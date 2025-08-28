@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smbx2-episode-updater"
+version = "0.1.0"
+description = "Minimal CLI updater for SMBX2 episodes"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Chipss" }]
+dependencies = [
+  "requests>=2.31",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+smbx2-updater = "smbx2_episode_updater.smbx2_episode_updater:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["smbx2_episode_updater"]
