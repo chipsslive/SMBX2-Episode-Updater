@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-smbx2-updater = "smbx2_episode_updater.smbx2_episode_updater:main"
+smbx2-updater = "src.smbx2_episode_updater:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["smbx2_episode_updater"]
+packages = ["src"]
