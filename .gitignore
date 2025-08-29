@@ -1,4 +1,2 @@
-.smbx2_episode_updater/__pycache__
-config
-state
-cache
+src/__pycache__
+data

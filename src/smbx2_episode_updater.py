@@ -2,7 +2,6 @@
 # Minimal CLI updater for SMBX2 episodes.
 # Dependencies: requests, tqdm
 
-import argparse
 import hashlib
 import json
 import shutil
@@ -10,22 +9,23 @@ import sys
 import zipfile
 from pathlib import Path
 from fnmatch import fnmatch
-from .download_helpers.download import (
+from download import (
     download_zip,
     probe_remote_metadata,
 )
- 
+import ctl
 
 APP_NAME = "smbx2_episode_updater"
 
 BASE_DIR = Path.cwd()
-CONFIG_DIR = BASE_DIR / "config"
-STATE_DIR = BASE_DIR / "state"
-CACHE_DIR = BASE_DIR / "cache"
+CONFIG_DIR = BASE_DIR / "data"
+STATE_DIR = BASE_DIR / "data"
+CACHE_DIR = BASE_DIR / "data/cache"
 STATE_PATH = STATE_DIR / "state.json"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-DEFAULT_PRESERVE = []
+# Files to not touch when updating
+DEFAULT_PRESERVE = ["save*-ext.dat", "save*.sav","progress.json"]
 
 def log(s: str):
     print(s, flush=True)
@@ -53,9 +53,6 @@ def read_config():
         "preserve_globs": DEFAULT_PRESERVE
     })
 
-def write_config(cfg):
-    save_json(CONFIG_PATH, cfg)
-
 def read_state():
     return load_json(STATE_PATH, {
         "last_zip_name": "",
@@ -63,9 +60,6 @@ def read_state():
         "install_dir_name": "",
         "installed_at": ""
     })
-
-def write_state(st):
-    save_json(STATE_PATH, st)
 
 def validate_path_is_dir(p: Path) -> bool:
     try:
@@ -87,10 +81,17 @@ def safe_join(base: Path, *parts) -> Path:
         raise RuntimeError("Blocked path traversal while extracting")
     return p
 
-def unzip_to_stage(zip_path: Path) -> Path:
+def unzip_to_stage(zip_path: Path) -> tuple[Path, str | None]:
     stage_root = CACHE_DIR / "stage" / sha256_file(zip_path)
     if stage_root.exists():
-        return stage_root
+        # Determine wrapper folder if there's exactly one top-level directory
+        try:
+            children = [p for p in stage_root.iterdir()]
+            if len(children) == 1 and children[0].is_dir():
+                return children[0], children[0].name
+            return stage_root, None
+        except Exception:
+            return stage_root, None
     stage_root.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -112,8 +113,41 @@ def unzip_to_stage(zip_path: Path) -> Path:
     # If contents are flat files, keep as-is. If a single top folder, collapse to that folder for consistency.
     children = [p for p in stage_root.iterdir()]
     if len(children) == 1 and children[0].is_dir():
-        return children[0]
-    return stage_root
+        return children[0], children[0].name
+    return stage_root, None
+
+def find_episode_root(stage: Path) -> Path:
+    """Return the directory that directly contains a *.wld file.
+
+    Heuristics:
+    - If stage itself contains any *.wld at top-level, use stage.
+    - Else search for any *.wld in subtree and pick the shallowest containing directory.
+    - If none found, fall back to stage.
+    """
+    # Top-level check
+    try:
+        for p in stage.iterdir():
+            if p.is_file() and p.suffix.lower() == ".wld":
+                return stage
+    except Exception:
+        pass
+
+    # Find shallowest *.wld in subtree
+    candidates = []
+    for p in stage.rglob("*.wld"):
+        try:
+            rel = p.relative_to(stage)
+            depth = len(rel.parts)
+            candidates.append((depth, p.parent))
+        except Exception:
+            candidates.append((9999, p.parent))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    # Fallback
+    return stage
 
 def _glob_preserved(path: Path, globs: list[str], base: Path) -> bool:
     rel = str(path.relative_to(base)).replace("\\", "/")
@@ -206,7 +240,7 @@ def do_init(args):
     cfg["episode_url"] = args.episode_url
     if not cfg.get("preserve_globs"):
         cfg["preserve_globs"] = DEFAULT_PRESERVE
-    write_config(cfg)
+    save_json(CONFIG_PATH, cfg)
     log(f"Config saved to {CONFIG_PATH}.")
 
 def do_set_url(args):
@@ -216,7 +250,7 @@ def do_set_url(args):
         log("Missing --episode-url")
         sys.exit(2)
     cfg["episode_url"] = args.episode_url
-    write_config(cfg)
+    save_json(CONFIG_PATH, cfg)
     log(f"URL updated in {CONFIG_PATH}.")
 
 def do_set_dir(args):
@@ -227,7 +261,7 @@ def do_set_dir(args):
         log(f"Episodes folder was not found at the path {args.episodes_dir}.")
         sys.exit(2)
     cfg["episodes_dir"] = str(episodes_dir)
-    write_config(cfg)
+    save_json(CONFIG_PATH, cfg)
     log(f"Episodes directory updated in {CONFIG_PATH}.")
 
 def do_check(args):
@@ -260,26 +294,33 @@ def do_update(args):
 
     zip_path, server_name, sha = download_zip(cfg["episode_url"])
     try:
-        stage = unzip_to_stage(zip_path)
-        # Folder name rule: use the zip filename without extension
-        target_name = Path(server_name).stem
+        stage, wrapper_name_opt = unzip_to_stage(zip_path)
+        # Pick directory that contains the episode's *.wld as root
+        episode_root = find_episode_root(stage)
+        # Always use the exact directory name that contains the .wld file
+        target_name = episode_root.name
         install_dir = episodes_dir / target_name
 
         if not install_dir.exists():
-            log(f"Fresh install to {install_dir}")
+            log(f"Will perform fresh install to {install_dir}")
             install_dir.mkdir(parents=True, exist_ok=True)
-            changed = merge_stage_into_install(stage, install_dir, cfg.get("preserve_globs") or [])
+            log("Performing fresh install... (This part may take a bit.)")
+            changed = merge_stage_into_install(episode_root, install_dir, cfg.get("preserve_globs") or [])
         else:
-            log(f"Merging into existing {install_dir}")
+            log(f"Will merge into existing {install_dir}")
+            log("Creating backup of previous installation...")
             backup = create_backup(install_dir)
-            log(f"Backup created: {backup.name}")
-            changed = merge_stage_into_install(stage, install_dir, cfg.get("preserve_globs") or [])
+            log(f"Backup created with name: {backup.name}")
+            log("Performing merge... (This part may take a bit.)")
+            changed = merge_stage_into_install(episode_root, install_dir, cfg.get("preserve_globs") or [])
+
+        log("Recording state...")
 
         st["last_zip_name"] = server_name
         st["last_zip_sha256"] = sha
         st["install_dir_name"] = target_name
         st["installed_at"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
-        write_state(st)
+        save_json(STATE_PATH, st)
 
         log(f"Done. {len(changed)} files changed.")
     finally:
@@ -292,43 +333,16 @@ def do_show(args):
     ensure_dirs()
     cfg = read_config()
     st = read_state()
+    print("The config contains info about where episode data is stored and where to get it from.")
     print("Config:")
     print(json.dumps(cfg, indent=2))
+    print("The state contains info about the last update.")
     print("State:")
     print(json.dumps(st, indent=2))
 
-def make_parser():
-    p = argparse.ArgumentParser(prog="smbx2-updater", description="SMBX2 episode updater")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    sp = sub.add_parser("init", help="set episodes dir and distributor URL")
-    sp.add_argument("--episodes-dir", required=True, help="Path to SMBX2 episodes directory")
-    sp.add_argument("--episode-url", required=True, help="Direct download URL of episode zip")
-    sp.set_defaults(func=do_init)
-
-    sp = sub.add_parser("set-url", help="update distributor URL")
-    sp.add_argument("--episode-url", required=True)
-    sp.set_defaults(func=do_set_url)
-
-    sp = sub.add_parser("set-dir", help="update episodes dir")
-    sp.add_argument("--episodes-dir", required=True)
-    sp.set_defaults(func=do_set_dir)
-
-    sp = sub.add_parser("check", help="print remote filename and size")
-    sp.set_defaults(func=do_check)
-
-    sp = sub.add_parser("update", help="download and install or merge")
-    sp.set_defaults(func=do_update)
-
-    sp = sub.add_parser("show", help="print current config and state")
-    sp.set_defaults(func=do_show)
-
-    return p
-
 def main():
     try:
-        parser = make_parser()
-        args = parser.parse_args()
+        args = ctl.make_parser().parse_args()
         args.func(args)
     except KeyboardInterrupt:
         log("Cancelled by user.")
