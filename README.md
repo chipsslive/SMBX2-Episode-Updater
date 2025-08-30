@@ -1,6 +1,6 @@
 # SMBX2 Episode Updater
 
-A user-friendly application for automatically updating SMBX2 (Super Mario Bros. X2) episodes. Features both a graphical interface and command-line tools for downloading, extracting, and merging episode (or entirely fresh installs!) while preserving save files and user data.
+A user-friendly application for automatically updating SMBX2 (Super Mario Bros. X2) episodes. Features both a graphical interface and command-line tools for downloading, extracting, and merging files to update (or install) episodes while preserving save files and user data.
 
 ## Quick Start
 
