@@ -96,7 +96,7 @@ python -m PyInstaller --noconfirm --name "SMBX2 Episode Updater" --paths src src
 
 **Single File Executable Build (Slower)**:
 ```bash
-pyinstaller --noconfirm --onefile --name "SMBX2 Episode Updater" --paths src src/gui.py
+python -m PyInstaller --noconfirm --onefile --name "SMBX2 Episode Updater" --paths src src/gui.py
 ```
 
 Built executables will be in the `dist/` directory.
